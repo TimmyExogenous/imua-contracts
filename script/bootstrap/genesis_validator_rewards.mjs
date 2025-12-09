@@ -92,15 +92,18 @@ async function getAllGenesisFiles(dirPath) {
 
 async function parseGenesisFile(filePath) {
   console.log(`Processing: ${path.basename(filePath)}`);
-  
+
   const content = await fs.readFile(filePath, 'utf-8');
   const json = JSON.parse(content);
-  
+
   const genesisTimeStr = json.genesis_time;
   if (!genesisTimeStr) {
     throw new Error(`Missing 'genesis_time' in ${path.basename(filePath)}`);
   }
   const genesisTime = new Date(genesisTimeStr).getTime();
+  if (Number.isNaN(genesisTime)) {
+    throw new Error(`Invalid 'genesis_time' format in ${path.basename(filePath)}: ${genesisTimeStr}`);
+  }
 
   let valSet = json.app_state?.dogfood?.val_set || json.app_state?.dogfood?.initial_val_set;
   if (!valSet) {
@@ -112,7 +115,9 @@ async function parseGenesisFile(filePath) {
   operatorRecords.forEach(record => {
     if (record.chains) {
       record.chains.forEach(chainInfo => {
-        consensusKeyToOpAddr[chainInfo.consensus_key.toLowerCase()] = record.operator_address;
+        if (chainInfo.consensus_key) {
+          consensusKeyToOpAddr[chainInfo.consensus_key.toLowerCase()] = record.operator_address;
+        }
       });
     }
   });
@@ -151,6 +156,9 @@ async function calculateTimeWeightedRewards() {
     let endTimeMs = Date.now();
     if (config.reward_end_time) {
       endTimeMs = new Date(config.reward_end_time).getTime();
+      if (Number.isNaN(endTimeMs)) {
+        throw new Error(`Invalid 'reward_end_time' format in config: ${config.reward_end_time}`);
+      }
     } else {
       console.warn("[Warn] 'reward_end_time' not found in config. Using current time.");
     }
@@ -176,7 +184,7 @@ async function calculateTimeWeightedRewards() {
 
     if (parsedFiles.length === 0) throw new Error("No valid genesis files found.");
     if (endTimeMs <= parsedFiles[parsedFiles.length - 1].genesisTime) {
-        throw new Error(`Configured reward_end_time is before or equal to the last genesis time.`);
+      throw new Error(`Configured reward_end_time is before or equal to the last genesis time.`);
     }
 
     const periods = [];
@@ -185,14 +193,14 @@ async function calculateTimeWeightedRewards() {
     for (let i = 0; i < parsedFiles.length; i++) {
       const current = parsedFiles[i];
       const nextTime = (i === parsedFiles.length - 1) ? endTimeMs : parsedFiles[i + 1].genesisTime;
-      
+
       const duration = nextTime - current.genesisTime;
       if (duration <= 0) continue;
 
       totalDurationMs += duration;
 
       periods.push({
-        ...current, 
+        ...current,
         periodStart: current.genesisTime,
         periodEnd: nextTime,
         duration: duration
@@ -204,7 +212,7 @@ async function calculateTimeWeightedRewards() {
 
     const totalSupply = new BigNumber(config.total_supply);
     const totalGlobalReward = totalSupply.times(config.genesis_validator_ratio);
-    
+
     const globalValidatorMap = new Map();
     const periodsOutput = [];
 
@@ -219,6 +227,10 @@ async function calculateTimeWeightedRewards() {
       let periodTotalPower = new BigNumber(0);
 
       for (const val of period.valSet) {
+        if (!val.public_key) {
+          console.log(`Skipping validator without public_key in ${period.fileName}`);
+          continue;
+        }
         const pubKey = val.public_key.toLowerCase();
         const power = new BigNumber(val.power);
 
@@ -229,18 +241,18 @@ async function calculateTimeWeightedRewards() {
         // pool from being distributed, causing a reward leak (remainder).
         // =========================================================
         if (power.lte(0)) {
-            //console.log(`Skipping zero-power validator in ${period.fileName}: ${pubKey}`);
-            continue; 
+          //console.log(`Skipping zero-power validator in ${period.fileName}: ${pubKey}`);
+          continue;
         }
-        
+
         let opAddr = val.operator_acc_addr || period.consensusKeyToOpAddr[pubKey];
         if (!opAddr) {
-            console.log(`Skipping validator without opAddr in ${period.fileName}: ${pubKey}`);
-            continue; 
-       }
+          console.log(`Skipping validator without opAddr in ${period.fileName}: ${pubKey}`);
+          continue;
+        }
 
         const name = period.opAddrToName[opAddr] || "Unknown";
-        
+
         const lowerName = name.toLowerCase();
         const isInternal = /^validator\d+$/i.test(lowerName) || /^operator\d+$/i.test(lowerName);
         const type = isInternal ? 'Internal' : 'External';
@@ -265,55 +277,55 @@ async function calculateTimeWeightedRewards() {
 
       if (config.distinguish_internal_external) {
         // Handle Empty Groups with Fixed Ratio
-         if (hasInternal && hasExternal) {
-            // Normal case: Both groups exist, apply fixed ratio
-             const extRatio = new BigNumber(config.external_validator_ratio);
-             externalPool = periodPool.times(extRatio);
-             internalPool = periodPool.minus(externalPool);
-         } else if (hasInternal) {
-            // Only Internal exists: They get 100% of this period's pool
-             internalPool = periodPool;
-             externalPool = new BigNumber(0);
-         } else if (hasExternal) {
-            // Only External exists: They get 100% of this period's pool
-             externalPool = periodPool;
-             internalPool = new BigNumber(0);
-         }
+        if (hasInternal && hasExternal) {
+          // Normal case: Both groups exist, apply fixed ratio
+          const extRatio = new BigNumber(config.external_validator_ratio);
+          externalPool = periodPool.times(extRatio);
+          internalPool = periodPool.minus(externalPool);
+        } else if (hasInternal) {
+          // Only Internal exists: They get 100% of this period's pool
+          internalPool = periodPool;
+          externalPool = new BigNumber(0);
+        } else if (hasExternal) {
+          // Only External exists: They get 100% of this period's pool
+          externalPool = periodPool;
+          internalPool = new BigNumber(0);
+        }
         // If neither exist (empty period), pools remain 0
       } else {
         // Mode B: Proportional to Power (No fix needed, handles 0 naturally)
-         if (!periodTotalPower.isZero()) {
-             internalPool = periodPool.times(internalPower).div(periodTotalPower);
-             externalPool = periodPool.minus(internalPool);
-         }
+        if (!periodTotalPower.isZero()) {
+          internalPool = periodPool.times(internalPower).div(periodTotalPower);
+          externalPool = periodPool.minus(internalPool);
+        }
       }
-      
+
       if (internalPool.gt(0) && internalPower.isZero()) {
-          console.warn(`[Leak Alert] Period ${period.fileName}: Internal pool has funds but TotalPower is 0. Rewards burned.`);
+        console.warn(`[Leak Alert] Period ${period.fileName}: Internal pool has funds but TotalPower is 0. Rewards burned.`);
       }
       if (externalPool.gt(0) && externalPower.isZero()) {
-          console.warn(`[Leak Alert] Period ${period.fileName}: External pool has funds but TotalPower is 0. Rewards burned.`);
+        console.warn(`[Leak Alert] Period ${period.fileName}: External pool has funds but TotalPower is 0. Rewards burned.`);
       }
 
       // Distribute Function
       const distributeToGroup = (validators, pool, totalGroupPower) => {
         if (totalGroupPower.isZero()) return;
         validators.forEach(v => {
-            const reward = pool.times(v.power).div(totalGroupPower);
-            
-            if (!globalValidatorMap.has(v.opAddr)) {
-                globalValidatorMap.set(v.opAddr, {
-                    operator_address: v.opAddr,
-                    name: v.name,
-                    type: v.type,
-                    total_reward: new BigNumber(0),
-                    periods_active: 0
-                });
-            }
-            const record = globalValidatorMap.get(v.opAddr);
-            record.total_reward = record.total_reward.plus(reward);
-            if (record.name === "Unknown" && v.name !== "Unknown") record.name = v.name;
-            record.periods_active += 1;
+          const reward = pool.times(v.power).div(totalGroupPower);
+
+          if (!globalValidatorMap.has(v.opAddr)) {
+            globalValidatorMap.set(v.opAddr, {
+              operator_address: v.opAddr,
+              name: v.name,
+              type: v.type,
+              total_reward: new BigNumber(0),
+              periods_active: 0
+            });
+          }
+          const record = globalValidatorMap.get(v.opAddr);
+          record.total_reward = record.total_reward.plus(reward);
+          if (record.name === "Unknown" && v.name !== "Unknown") record.name = v.name;
+          record.periods_active += 1;
         });
       };
 
@@ -324,43 +336,43 @@ async function calculateTimeWeightedRewards() {
       // PERIOD BREAKDOWN CONSTRUCTION
       // =========================================================
       periodsOutput.push({
-          period_name: period.fileName,
-          start_time: new Date(period.periodStart).toISOString(),
-          end_time: new Date(period.periodEnd).toISOString(),
-          duration_days: (period.duration / (1000 * 60 * 60 * 24)).toFixed(2),
-          
-          period_total_reward: periodPool.toFixed(18),
-          percentage_of_total_reward: periodRatio.toString(), 
-          percentage_of_total_supply: periodPool.div(totalSupply).toString(),
-          
-          // --- POWER STATS ---
-          total_voting_power: periodTotalPower.toString(),
-          internal_voting_power: internalPower.toString(), // [Added]
-          external_voting_power: externalPower.toString(), // [Added]
-          
-          // --- COUNTS ---
-          active_validators_count: internalVals.length + externalVals.length,
-          internal_validators_count: internalVals.length,
-          external_validators_count: externalVals.length,
-          
-          // --- REWARD RATIOS ---
-          internal_reward_percentage: periodPool.isZero() ? "0" : internalPool.div(periodPool).toString(),
-          external_reward_percentage: periodPool.isZero() ? "0" : externalPool.div(periodPool).toString()
+        period_name: period.fileName,
+        start_time: new Date(period.periodStart).toISOString(),
+        end_time: new Date(period.periodEnd).toISOString(),
+        duration_days: (period.duration / (1000 * 60 * 60 * 24)).toFixed(2),
+
+        period_total_reward: periodPool.toFixed(18),
+        percentage_of_total_reward: periodRatio.toString(),
+        percentage_of_total_supply: periodPool.div(totalSupply).toString(),
+
+        // --- POWER STATS ---
+        total_voting_power: periodTotalPower.toString(),
+        internal_voting_power: internalPower.toString(), // [Added]
+        external_voting_power: externalPower.toString(), // [Added]
+
+        // --- COUNTS ---
+        active_validators_count: internalVals.length + externalVals.length,
+        internal_validators_count: internalVals.length,
+        external_validators_count: externalVals.length,
+
+        // --- REWARD RATIOS ---
+        internal_reward_percentage: periodPool.isZero() ? "0" : internalPool.div(periodPool).toString(),
+        external_reward_percentage: periodPool.isZero() ? "0" : externalPool.div(periodPool).toString()
       });
     }
 
     // ------------------------------------------------------------------
     // Prepare & Enrich Results
     // ------------------------------------------------------------------
-    
+
     const allResults = Array.from(globalValidatorMap.values()).map(v => ({
-        operator_address: v.operator_address,
-        name: v.name,
-        type: v.type,
-        periods_participated: v.periods_active,
-        reward_amount: v.total_reward.toFixed(18),
-        percentage_of_total_supply: v.total_reward.div(totalSupply).toString(),
-        percentage_of_total_reward: v.total_reward.div(totalGlobalReward).toString()
+      operator_address: v.operator_address,
+      name: v.name,
+      type: v.type,
+      periods_participated: v.periods_active,
+      reward_amount: v.total_reward.toFixed(18),
+      percentage_of_total_supply: v.total_reward.div(totalSupply).toString(),
+      percentage_of_total_reward: v.total_reward.div(totalGlobalReward).toString()
     }));
 
     // Split Groups
@@ -375,10 +387,10 @@ async function calculateTimeWeightedRewards() {
 
     // Enrich with percentage_of_group_reward
     const enrichWithGroupStats = (list, groupTotal) => {
-        return list.map(v => ({
-            ...v,
-            percentage_of_group_reward: groupTotal.isZero() ? "0" : new BigNumber(v.reward_amount).div(groupTotal).toString()
-        }));
+      return list.map(v => ({
+        ...v,
+        percentage_of_group_reward: groupTotal.isZero() ? "0" : new BigNumber(v.reward_amount).div(groupTotal).toString()
+      }));
     };
 
     internalList = enrichWithGroupStats(internalList, internalTotalReward);
@@ -386,9 +398,9 @@ async function calculateTimeWeightedRewards() {
 
     // Sort Descending
     const sortByReward = (a, b) => {
-        const rA = new BigNumber(a.reward_amount);
-        const rB = new BigNumber(b.reward_amount);
-        return rB.comparedTo(rA);
+      const rA = new BigNumber(a.reward_amount);
+      const rB = new BigNumber(b.reward_amount);
+      return rB.comparedTo(rA);
     };
 
     internalList.sort(sortByReward);
@@ -407,12 +419,12 @@ async function calculateTimeWeightedRewards() {
     console.log(`Internal Allocated Reward: ${internalTotalReward.toFixed(6)}`);
     console.log(`External Allocated Reward: ${externalTotalReward.toFixed(6)}`);
     console.log("------------------------------------------------");
-    
+
     const printList = (list) => {
-        list.forEach(v => {
-            const formattedAmount = new BigNumber(v.reward_amount).toFixed(6);
-            console.log(`- [${v.type}] ${v.name} (${v.operator_address}): ${formattedAmount}`);
-        });
+      list.forEach(v => {
+        const formattedAmount = new BigNumber(v.reward_amount).toFixed(6);
+        console.log(`- [${v.type}] ${v.name} (${v.operator_address}): ${formattedAmount}`);
+      });
     };
     console.log("Internal Validators:");
     printList(internalList);
@@ -424,34 +436,34 @@ async function calculateTimeWeightedRewards() {
     // JSON Output Construction
     // ------------------------------------------------------------------
     const outputData = {
-        meta: {
-            total_supply: totalSupply.toString(),
-            total_reward_pool: totalGlobalReward.toString(),
-            total_duration_days: totalDurationDays.toString(),
-            config_used: config,
-            generation_time: new Date().toISOString()
+      meta: {
+        total_supply: totalSupply.toString(),
+        total_reward_pool: totalGlobalReward.toString(),
+        total_duration_days: totalDurationDays.toString(),
+        config_used: config,
+        generation_time: new Date().toISOString()
+      },
+      summary: {
+        total_allocated: totalAllocated.toString(),
+        remainder: remainder.toString(),
+        internal: {
+          allocated_reward: internalTotalReward.toString(),
+          percentage_of_total_reward: totalGlobalReward.isZero() ? "0" : internalTotalReward.div(totalGlobalReward).toString()
         },
-        summary: {
-            total_allocated: totalAllocated.toString(),
-            remainder: remainder.toString(),
-            internal: {
-                allocated_reward: internalTotalReward.toString(),
-                percentage_of_total_reward: totalGlobalReward.isZero() ? "0" : internalTotalReward.div(totalGlobalReward).toString()
-            },
-            external: {
-                allocated_reward: externalTotalReward.toString(),
-                percentage_of_total_reward: totalGlobalReward.isZero() ? "0" : externalTotalReward.div(totalGlobalReward).toString()
-            }
-        },
-        periods_breakdown: periodsOutput,
-        details: {
-            internal_validators: internalList,
-            external_validators: externalList
+        external: {
+          allocated_reward: externalTotalReward.toString(),
+          percentage_of_total_reward: totalGlobalReward.isZero() ? "0" : externalTotalReward.div(totalGlobalReward).toString()
         }
+      },
+      periods_breakdown: periodsOutput,
+      details: {
+        internal_validators: internalList,
+        external_validators: externalList
+      }
     };
 
     if (!await fs.stat(outputDir).catch(() => false)) {
-        await fs.mkdir(outputDir, { recursive: true });
+      await fs.mkdir(outputDir, { recursive: true });
     }
     const finalPath = path.join(outputDir, 'genesis_rewards_distribution.json');
     await fs.writeFile(finalPath, JSON.stringify(outputData, null, 2));
@@ -460,6 +472,7 @@ async function calculateTimeWeightedRewards() {
 
   } catch (error) {
     console.error('Error:', error.message, error.stack);
+    process.exit(1);
   }
 }
 
