@@ -207,7 +207,7 @@ async function updateGenesisFile() {
     const existingChainIdIndex = genesisJSON.app_state.
       assets.client_chains.findIndex(
         chain =>
-        chain.layer_zero_chain_id === clientChainInfo.layer_zero_chain_id
+          chain.layer_zero_chain_id === clientChainInfo.layer_zero_chain_id
       );
     if (existingChainIdIndex >= 0) {
       // If found, raise an error
@@ -304,7 +304,7 @@ async function updateGenesisFile() {
       } else {
         if (TokenMappingChainIDsForOracle[tokenNamesForOracle[i]] == null) {
           throw new Error(`Missing chain_id mapping for ${tokenNamesForOracle[i]}`);
-       	}
+        }
         if (token.tokenAddress == VIRTUAL_STAKED_ETH_ADDR) {
           throw new Error('Oracle name refers to LST token but this is NST');
         }
@@ -537,7 +537,7 @@ async function updateGenesisFile() {
             balances.push(new_balance);
           }
           //staker_infos.validator_list = validatorInfos;
-        const staker_info = {
+          const staker_info = {
             staker_addr: stakerAddress.toLowerCase(),
             staker_index: staker_index_counter,
             validator_list: validatorInfos,
@@ -809,10 +809,10 @@ async function updateGenesisFile() {
       }
       const operatorInfo = await myContract.methods.validators(opAddressIm).call();
       const operator_info = {
-        earnings_addr: opAddressIm,
-        // approve_addr set to opAddressIm
-        approve_addr: opAddressIm,
-        operator_meta_info: operatorInfo.name,
+        operator_addr: opAddressIm,
+        description: {
+          moniker: operatorInfo.name,
+        },
         client_chain_earnings_addr: {
           earning_info_list: [
             {
@@ -836,11 +836,7 @@ async function updateGenesisFile() {
           update_time: spawnDate,
         }
       }
-      const operatorCleaned = {
-        operator_address: opAddressIm,
-        operator_info: operator_info
-      }
-      operators.push(operatorCleaned);
+      operators.push(operator_info);
       // dogfood: val_set
       // TODO: once the oracle module is set up, move away from this solution
       // and instead, load the asset prices into the oracle module genesis
@@ -882,8 +878,8 @@ async function updateGenesisFile() {
         selfDelegationAmount = selfDelegationAmount.minus(selfSlashing).truncated();
         amount = amount.plus(
           selfDelegationAmount.
-          div('1e' + decimals[j]).
-          mul(exchangeRates[j].toFixed())
+            div('1e' + decimals[j]).
+            mul(exchangeRates[j].toFixed())
         );
         const perTokenDelegation = new Decimal((await myContract.methods.delegationsByValidator(
           opAddressIm, tokenAddress
@@ -956,10 +952,10 @@ async function updateGenesisFile() {
     }
     // operators
     operators.sort((a, b) => {
-      if (a.operator_address < b.operator_address) {
+      if (a.operator_addr < b.operator_addr) {
         return -1;
       }
-      if (a.operator_address > b.operator_address) {
+      if (a.operator_addr > b.operator_addr) {
         return 1;
       }
       return 0;
@@ -1111,7 +1107,7 @@ async function updateGenesisFile() {
               key: key,
               states: {
                 undelegatable_share: amount.toFixed(),
-                wait_undelegation_amount: "0"
+                pending_undelegation_amount: "0"
               },
             });
 
