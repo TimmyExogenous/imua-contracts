@@ -54,9 +54,9 @@
  * $ npm install bignumber.js
  *
  * 2. Command:
- * $ node calculate_rewards.mjs <genesis_dir> <config_dir> <output_dir>
+ * $ node genesis_validator_rewards.mjs <genesis_dir> <config_dir> <output_dir>
  * * Example:
- * $ node calculate_rewards.mjs ./genesis_files ./config ./output
+ * $ node genesis_validator_rewards.mjs ./genesis_files ./config ./output
  *
  * 3. Configuration (config.json inside <config_dir>):
  * {
@@ -71,9 +71,25 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { BigNumber } from 'bignumber.js';
+import { decode, encode } from 'bech32';
 
 // Configure BigNumber
 BigNumber.config({ DECIMAL_PLACES: 18, ROUNDING_MODE: BigNumber.ROUND_DOWN });
+
+// Normalize any cosmos bech32 address to use the canonical 'im' prefix.
+// This handles the rebranding from 'exo' prefix to 'im' prefix, ensuring
+// that the same underlying address is treated as one entity.
+function normalizeAddress(addr) {
+  if (!addr) return addr;
+  try {
+    const { prefix, words } = decode(addr);
+    if (prefix === 'im') return addr; // already canonical
+    return encode('im', words);
+  } catch (e) {
+    console.warn(`[Warn] Failed to decode bech32 address: ${addr}, keeping as-is`);
+    return addr;
+  }
+}
 
 async function getAllGenesisFiles(dirPath) {
   let files = [];
@@ -116,7 +132,7 @@ async function parseGenesisFile(filePath) {
     if (record.chains) {
       record.chains.forEach(chainInfo => {
         if (chainInfo.consensus_key) {
-          consensusKeyToOpAddr[chainInfo.consensus_key.toLowerCase()] = record.operator_address;
+          consensusKeyToOpAddr[chainInfo.consensus_key.toLowerCase()] = normalizeAddress(record.operator_address);
         }
       });
     }
@@ -127,7 +143,10 @@ async function parseGenesisFile(filePath) {
   operators.forEach(op => {
     const earningsAddr = op.earnings_addr || op.operator_info?.earnings_addr;
     const metaInfo = op.operator_meta_info || op.operator_info?.operator_meta_info;
-    if (earningsAddr) opAddrToName[earningsAddr] = metaInfo || "";
+    if (earningsAddr) {
+      const normalizedAddr = normalizeAddress(earningsAddr);
+      opAddrToName[normalizedAddr] = metaInfo || "";
+    }
   });
 
   return {
@@ -195,7 +214,13 @@ async function calculateTimeWeightedRewards() {
       const nextTime = (i === parsedFiles.length - 1) ? endTimeMs : parsedFiles[i + 1].genesisTime;
 
       const duration = nextTime - current.genesisTime;
-      if (duration <= 0) continue;
+      if (duration <= 0) {
+        const currentTs = new Date(current.genesisTime).toISOString();
+        const nextTs = new Date(nextTime).toISOString();
+        console.warn(`[Warn] Skipping period ${current.fileName}: non-positive duration (${duration}ms). ` +
+          `current_genesis_time=${currentTs}, next_boundary=${nextTs}`);
+        continue;
+      }
 
       totalDurationMs += duration;
 
@@ -226,6 +251,16 @@ async function calculateTimeWeightedRewards() {
       let externalPower = new BigNumber(0);
       let periodTotalPower = new BigNumber(0);
 
+      // =========================================================
+      // Phase 1: Collect and DEDUPLICATE validators by normalized
+      // address within this period. After rebranding, the same
+      // validator may appear with 'exo' and 'im' prefixes — these
+      // must be treated as one entity. Normally each operator should
+      // only participate once per period; duplicates are merged with
+      // a warning.
+      // =========================================================
+      const periodValMap = new Map();
+
       for (const val of period.valSet) {
         if (!val.public_key) {
           console.log(`Skipping validator without public_key in ${period.fileName}`);
@@ -234,18 +269,14 @@ async function calculateTimeWeightedRewards() {
         const pubKey = val.public_key.toLowerCase();
         const power = new BigNumber(val.power);
 
-        // =========================================================
-        // FIX: Filter out validators with zero voting power.
-        // If not filtered, a group might appear non-empty (has validators) 
-        // but have 0 Total Power. This prevents the group's allocated 
-        // pool from being distributed, causing a reward leak (remainder).
-        // =========================================================
+        // Filter out validators with zero voting power to prevent reward leaks.
         if (power.lte(0)) {
-          //console.log(`Skipping zero-power validator in ${period.fileName}: ${pubKey}`);
           continue;
         }
 
-        let opAddr = val.operator_acc_addr || period.consensusKeyToOpAddr[pubKey];
+        let opAddr = val.operator_acc_addr
+          ? normalizeAddress(val.operator_acc_addr)
+          : period.consensusKeyToOpAddr[pubKey]; // already normalized in parseGenesisFile
         if (!opAddr) {
           console.log(`Skipping validator without opAddr in ${period.fileName}: ${pubKey}`);
           continue;
@@ -253,20 +284,45 @@ async function calculateTimeWeightedRewards() {
 
         const name = period.opAddrToName[opAddr] || "Unknown";
 
-        const lowerName = name.toLowerCase();
-        const isInternal = /^validator\d+$/i.test(lowerName) || /^operator\d+$/i.test(lowerName);
+        if (periodValMap.has(opAddr)) {
+          // Same normalized address already seen in this period — merge
+          const existing = periodValMap.get(opAddr);
+          existing.power = existing.power.plus(power);
+          if (name !== "Unknown" && !existing.names.includes(name)) {
+            existing.names.push(name);
+          }
+          console.log(`[Merge] Duplicate address in period ${period.fileName}: ${opAddr} — power merged`);
+        } else {
+          periodValMap.set(opAddr, {
+            opAddr,
+            names: name !== "Unknown" ? [name] : [],
+            power,
+          });
+        }
+      }
+
+      // =========================================================
+      // Phase 2: Classify deduplicated validators into Internal /
+      // External and accumulate voting power.
+      // =========================================================
+      for (const [, valData] of periodValMap) {
+        const allNames = valData.names.length > 0 ? valData.names : ["Unknown"];
+        const name = allNames.join(',');
+
+        // A validator is Internal only if ALL of its names match the internal pattern.
+        const isInternal = allNames.every(n => /^(validator|operator)\d+$/i.test(n));
         const type = isInternal ? 'Internal' : 'External';
 
-        const validatorObj = { opAddr, name, power, type };
+        const validatorObj = { opAddr: valData.opAddr, name, power: valData.power, type };
 
         if (isInternal) {
           internalVals.push(validatorObj);
-          internalPower = internalPower.plus(power);
+          internalPower = internalPower.plus(valData.power);
         } else {
           externalVals.push(validatorObj);
-          externalPower = externalPower.plus(power);
+          externalPower = externalPower.plus(valData.power);
         }
-        periodTotalPower = periodTotalPower.plus(power);
+        periodTotalPower = periodTotalPower.plus(valData.power);
       }
 
       const hasInternal = internalVals.length > 0;
@@ -324,7 +380,17 @@ async function calculateTimeWeightedRewards() {
           }
           const record = globalValidatorMap.get(v.opAddr);
           record.total_reward = record.total_reward.plus(reward);
-          if (record.name === "Unknown" && v.name !== "Unknown") record.name = v.name;
+
+          // Merge names: combine all unique names across periods (e.g. "operator1,validator1").
+          const existingNames = record.name.split(',').filter(n => n && n !== 'Unknown');
+          const newNames = v.name.split(',').filter(n => n && n !== 'Unknown');
+          for (const n of newNames) {
+            if (!existingNames.includes(n)) {
+              existingNames.push(n);
+            }
+          }
+          record.name = existingNames.length > 0 ? existingNames.join(',') : "Unknown";
+
           record.periods_active += 1;
         });
       };
