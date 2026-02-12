@@ -163,7 +163,7 @@ async function calculateTimeWeightedRewards() {
   try {
     const args = process.argv.slice(2);
     if (args.length < 3) {
-      console.error("Usage: node calculate_rewards.mjs <genesis_dir> <config_dir> <output_dir>");
+      console.error("Usage: node genesis_validator_rewards.mjs <genesis_dir> <config_dir> <output_dir>");
       process.exit(1);
     }
     const [genesisDir, configDir, outputDir] = args;
@@ -235,8 +235,14 @@ async function calculateTimeWeightedRewards() {
     const totalDurationDays = new BigNumber(totalDurationMs).div(1000 * 60 * 60 * 24);
     console.log(`Total Duration: ${totalDurationDays.toFixed(2)} days.`);
 
+    if (!config.total_supply || !config.genesis_validator_ratio) {
+      throw new Error("Config must include 'total_supply' and 'genesis_validator_ratio'.");
+    }
     const totalSupply = new BigNumber(config.total_supply);
     const totalGlobalReward = totalSupply.times(config.genesis_validator_ratio);
+    if (totalSupply.isNaN() || totalGlobalReward.isNaN()) {
+      throw new Error(`Invalid numeric config values: total_supply=${config.total_supply}, genesis_validator_ratio=${config.genesis_validator_ratio}`);
+    }
 
     const globalValidatorMap = new Map();
     const periodsOutput = [];
@@ -332,10 +338,13 @@ async function calculateTimeWeightedRewards() {
       let externalPool = new BigNumber(0);
 
       if (config.distinguish_internal_external) {
+        const extRatio = new BigNumber(config.external_validator_ratio);
+        if (extRatio.isNaN() || extRatio.lt(0) || extRatio.gt(1)) {
+          throw new Error(`Invalid 'external_validator_ratio': ${config.external_validator_ratio}. Must be a number between 0 and 1.`);
+        }
         // Handle Empty Groups with Fixed Ratio
         if (hasInternal && hasExternal) {
           // Normal case: Both groups exist, apply fixed ratio
-          const extRatio = new BigNumber(config.external_validator_ratio);
           externalPool = periodPool.times(extRatio);
           internalPool = periodPool.minus(externalPool);
         } else if (hasInternal) {
