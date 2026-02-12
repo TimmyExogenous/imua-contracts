@@ -240,7 +240,7 @@ async function calculateTimeWeightedRewards() {
     }
     const totalSupply = new BigNumber(config.total_supply);
     const totalGlobalReward = totalSupply.times(config.genesis_validator_ratio);
-    if (totalSupply.isNaN() || totalGlobalReward.isNaN()) {
+    if (totalSupply.isNaN() || totalGlobalReward.isNaN() || totalSupply.lte(0) || totalGlobalReward.lte(0)) {
       throw new Error(`Invalid numeric config values: total_supply=${config.total_supply}, genesis_validator_ratio=${config.genesis_validator_ratio}`);
     }
 
