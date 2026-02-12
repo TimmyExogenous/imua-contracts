@@ -50,8 +50,8 @@
  * - This prevents rewards from being "burned" or unallocated when a group is missing.
  * 
  * Usage:
- * 1. Dependencies: Ensure `bignumber.js` is installed.
- * $ npm install bignumber.js
+ * 1. Dependencies: Ensure `bignumber.js` and `bech32` are installed.
+ *    $ npm install bignumber.js bech32
  *
  * 2. Command:
  * $ node genesis_validator_rewards.mjs <genesis_dir> <config_dir> <output_dir>
