@@ -275,8 +275,9 @@ async function calculateTimeWeightedRewards() {
         const pubKey = val.public_key.toLowerCase();
         const power = new BigNumber(val.power);
 
-        // Filter out validators with zero voting power to prevent reward leaks.
-        if (power.lte(0)) {
+        // Filter out invalid voting power values to prevent reward leaks and broken math.
+        if (!power.isFinite() || power.isNaN() || power.lte(0)) {
+          console.warn(`[Warn] Invalid validator power in ${period.fileName}: ${val.power}`);
           continue;
         }
 
